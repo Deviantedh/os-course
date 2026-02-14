@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.12)
 
 project(
-    vtsh
-    VERSION 0.1
-    DESCRIPTION "VT Shell"
-    LANGUAGES C
+        vtsh
+        VERSION 0.1
+        DESCRIPTION "VT Shell"
+        LANGUAGES C
 )
 
+set(CMAKE_C_COMPILER gcc)
+set(CMAKE_C_STANDARD 11)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_subdirectory(bin)
