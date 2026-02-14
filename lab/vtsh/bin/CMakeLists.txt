@@ -49,5 +49,4 @@ target_link_libraries(
         libvtsh
 )
 
-set(CMAKE_C_COMPILER gcc)
 set(CMAKE_C_STANDARD 11)
