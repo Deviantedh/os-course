@@ -7,7 +7,6 @@ project(
         LANGUAGES C
 )
 
-set(CMAKE_C_COMPILER gcc)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
