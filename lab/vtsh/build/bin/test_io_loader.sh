@@ -1,6 +1,9 @@
 #!/bin/bash
 set +m
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IO_LOADER_BIN="${IO_LOADER_BIN:-$SCRIPT_DIR/io-loader}"
+
 BS=$2
 COUNT=$3
 FILE=$4
@@ -27,23 +30,37 @@ run_load_test() {
     iostat 1 > "$OUT_DIR/iostat_log_${TAG}.txt" 2>/dev/null &
     IOSTAT_PID=$!
 
-    top -l 0 -stats pid,command,cpu,mem,time,state,csw > "$OUT_DIR/top_log_${TAG}.txt" 2>/dev/null &
+    top -b -d 1 > "$OUT_DIR/top_log_${TAG}.txt" 2>/dev/null &
     TOP_PID=$!
 
     sleep 1
 
-    /usr/bin/time -l ./io-loader \
-    "$RW" \
-    "$BLOCK_SIZE" \
-    "$BLOCK_COUNT" \
-    "$FILE" \
-    "$RANGE" \
-    "$DIRECT" \
-    "$TYPE" \
+    echo "Arguments:"
+    echo "RW: $RW"
+    echo "BLOCK_SIZE: $BLOCK_SIZE"
+    echo "BLOCK_COUNT: $BLOCK_COUNT"
+    echo "FILE: $FILE"
+    echo "RANGE: $RANGE"
+    echo "DIRECT: $DIRECT"
+    echo "TYPE: $TYPE"
+
+    if [[ ! -x "$IO_LOADER_BIN" ]]; then
+        echo "error: io-loader not found or not executable: $IO_LOADER_BIN" >&2
+        echo "build it first: cmake --build \"$SCRIPT_DIR/..\" --target io-loader" >&2
+        return 1
+    fi
+    if [[ ! -s "$IO_LOADER_BIN" ]]; then
+        echo "error: io-loader binary is empty: $IO_LOADER_BIN" >&2
+        echo "rebuild target: cmake --build \"$SCRIPT_DIR/..\" --target io-loader --clean-first" >&2
+        return 1
+    fi
+
+    /usr/bin/time -v "$IO_LOADER_BIN" \
+    "$RW" "$BLOCK_SIZE" "$BLOCK_COUNT" "$FILE" \
+    "$RANGE" "$DIRECT" "$TYPE" \
     2> >(tee "$OUT_DIR/time_${TAG}.txt" >&2) \
     | tee "$OUT_DIR/output_${TAG}.txt"
 
-    wair $!
 
     kill "$IOSTAT_PID" "$TOP_PID" 2>/dev/null
     wait "$IOSTAT_PID" 2>/dev/null
@@ -51,7 +68,7 @@ run_load_test() {
 
     echo
     echo "--- TOP (CPU/MEM) ---"
-    grep io-load "$OUT_DIR/top_log_${TAG}.txt" | tail -10
+    grep io-loader "$OUT_DIR/top_log_${TAG}.txt" | tail -10
     echo
     echo "--- IOSTAT (Disk MB/s) ---"
     tail -10 "$OUT_DIR/iostat_log_${TAG}.txt"
@@ -66,6 +83,7 @@ echo "5) read sequence off"
 echo "6) read random off"
 read -p "Choice: " CHOICE
 echo
+
 
 case $CHOICE in
     1) run_load_test write $BS $COUNT $FILE 0-0 off sequence ;;

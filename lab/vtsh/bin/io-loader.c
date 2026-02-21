@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
+#include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -30,39 +32,38 @@ void print_usage(void) {
   printf("  type: sequence or random access\n");
 }
 
-int parse_range(const char* range, int* start_offset, int* end_offset) {
+int parse_range(const char* range, int64_t* start_offset, int64_t* end_offset) {
   if (strcmp(range, "0-0") != 0) {
     char* endptr1 = NULL;
+    errno = 0;
 
-    long start_offset_long = strtol(range, &endptr1, TEN);
+    long long start_offset_long = strtoll(range, &endptr1, TEN);
     if (*endptr1 != '-' || *(endptr1 + 1) == '\0') {
       (void)fprintf(stderr, "Invalid range format: %s\n", range);
       return -1;
     }
 
-    if (start_offset_long < INT_MIN || start_offset_long > INT_MAX) {
+    if (errno == ERANGE) {
       (void)fprintf(
-          stderr,
-          "start_offset is out of range for int: %ld\n",
-          start_offset_long
+          stderr, "start_offset is out of range: %lld\n", start_offset_long
       );
       return -1;
     }
-    *start_offset = (int)start_offset_long;
+    *start_offset = (int64_t)start_offset_long;
 
-    long end_offset_long = strtol(endptr1 + 1, &endptr1, TEN);
+    errno = 0;
+    long long end_offset_long = strtoll(endptr1 + 1, &endptr1, TEN);
     if (*endptr1 != '\0') {
       (void)fprintf(stderr, "Invalid range format: %s\n", range);
       return -1;
     }
 
-    if (end_offset_long < INT_MIN || end_offset_long > INT_MAX) {
-      (void)fprintf(
-          stderr, "end_offset is out of range for int: %ld\n", end_offset_long
-      );
+    if (errno == ERANGE) {
+      (void
+      )fprintf(stderr, "end_offset is out of range: %lld\n", end_offset_long);
       return -1;
     }
-    *end_offset = (int)end_offset_long;
+    *end_offset = (int64_t)end_offset_long;
 
     if (*start_offset < 0 || *end_offset < *start_offset) {
       (void)fprintf(stderr, "Invalid range format: %s\n", range);
@@ -146,24 +147,27 @@ void perform_read_write(
 }
 
 int perform_random_access(
-    int filed1, const int start_offset1, int end_offset1
+    int filed1, const int64_t start_offset1, int64_t end_offset1
 ) {
   if (start_offset1 == 0 && end_offset1 == 0) {
-    end_offset1 = INT_MAX;
+    end_offset1 = INT64_MAX;
   }
 
   if (end_offset1 <= start_offset1) {
     (void)fprintf(
         stderr,
-        "Invalid range for random access: %d-%d\n",
+        "Invalid range for random access: %" PRId64 "-%" PRId64 "\n",
         start_offset1,
         end_offset1
     );
     return -1;
   }
 
-  long random_offset =
-      (random() % (end_offset1 - start_offset1)) + start_offset1;
+  const uint64_t range_len = (uint64_t)(end_offset1 - start_offset1);
+  const uint64_t res = ((uint64_t)(unsigned long)random() << 33U) ^
+                       ((uint64_t)(unsigned long)random() << 2U) ^
+                       ((uint64_t)(unsigned long)random() & 0x3U);
+  const int64_t random_offset = start_offset1 + (int64_t)(res % range_len);
   if (lseek(filed1, (off_t)random_offset, SEEK_SET) == (off_t)-1) {
     perror("Failed to seek to a random position");
     return -1;
@@ -192,8 +196,8 @@ int main(const int argc, char* argv[]) {
   const char* direct_flag = argv[SIX];
   const char* access_type = argv[SEVEN];
 
-  int start_offset = 0;
-  int end_offset = 0;
+  int64_t start_offset = 0;
+  int64_t end_offset = 0;
   if (parse_range(range, &start_offset, &end_offset) != 0) {
     return EXIT_FAILURE;
   }

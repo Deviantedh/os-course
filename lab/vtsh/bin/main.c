@@ -13,6 +13,7 @@
 #define MAX_BG_PIDS 128
 #define COMMAND_NOT_FOUND 127
 #define STACK_SIZE 16384
+#define SLEEP_NUM 10000
 
 typedef struct {
   pid_t bg_pids[MAX_BG_PIDS];
@@ -42,14 +43,13 @@ static void add_bg_pid(bg_processes_t* bg_processes, const pid_t pidd) {
   }
 }
 
-static bool is_bg_pid(const bg_processes_t* bg_processes, const pid_t piddd) {
+/*static bool is_bg_pid(const bg_processes_t* bg_processes, const pid_t piddd) {
   for (int i = 0; i < bg_processes->bg_count; i++) {
     if (bg_processes->bg_pids[i] == piddd) {
       return true;
     }
   }
-  return false;
-}
+  return */
 
 static void parse_arguments(char* input, char** args) {
   int count = 0;
@@ -66,6 +66,10 @@ static void parse_arguments(char* input, char** args) {
 static void run_cat() {
   char buffer[MAX_INPUT];
   while (fgets(buffer, sizeof(buffer), stdin)) {
+    /*size_t lenn = strlen(buffer);
+    if (lenn > 0 && buffer[lenn - 1] == '\n') {
+      buffer[lenn - 1] = 0;
+    }*/
     write(STDOUT_FILENO, buffer, strlen(buffer));
   }
   _exit(0);
@@ -74,6 +78,10 @@ static void run_cat() {
 static void run_command(
     bg_processes_t* bg_processes, char** args, bool background
 ) {
+  if (args[0] != NULL && strcmp(args[0], "cat") == 0 && args[1] == NULL) {
+    run_cat();
+    return;
+  }
   pid_t pid = do_clone3_or_fork();
   if (pid == -1) {
     perror("clone3/fork");
@@ -81,13 +89,13 @@ static void run_command(
   }
 
   if (pid == 0) {  // Дочерний процесс
-    if (args[0] != NULL && strcmp(args[0], "cat") == 0) {
-      run_cat();
-    } else if (execvp(args[0], args) == -1) {
-      perror("execvp");
-      _exit(COMMAND_NOT_FOUND);
-    }
-    _exit(0);
+    // printf(">> %s\n", args[0]);
+    execvp(args[0], args);
+    // if (execvp(args[0], args) == -1) {
+    perror("execvp");
+    _exit(COMMAND_NOT_FOUND);
+    //}
+    //    _exit(0);
   }
 
   pid_t child_pid = pid;
@@ -98,10 +106,17 @@ static void run_command(
   }
 
   int status = 0;
-  pid_t wait_pid = waitpid(child_pid, &status, 0);
-  if (wait_pid == -1) {
-    perror("waitpid");
-    return;
+  pid_t wait_pid = -1;
+  while (true) {
+    wait_pid = waitpid(child_pid, &status, WNOHANG);
+    if (wait_pid > 0) {
+      break;
+    }
+    if (wait_pid < 0) {
+      perror("waitpid");
+      return;
+    }
+    usleep(SLEEP_NUM);
   }
 
   // Обрабатываем результат завершения дочернего процесса
@@ -133,7 +148,7 @@ int main(void) {
   while (true) {
     printf("%s", vtsh_prompt());
     if (fgets(input, sizeof(input), stdin) == NULL) {
-      printf("\n");
+      // printf("\n");
       break;
     }
     trim_spaces(input);
