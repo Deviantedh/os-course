@@ -18,14 +18,24 @@
 #define O_DIRECT_FLAG "on"
 #define SEQUENCE_ACCESS "sequence"
 #define RANDOM_ACCESS "random"
+#define ENINE 1e9
+
 enum { IO_ALIGNMENT = 4096 };
-enum { ARGS_COUNT = 8, TEN = 10, FIVE = 5, SIX = 6, SEVEN = 7, SIZE = 256 };
+enum {
+  ARGS_COUNT = 8,
+  TEN = 10,
+  FIVE = 5,
+  SIX = 6,
+  SEVEN = 7,
+  EIGHT = 8,
+  SIZE = 256
+};
 
 void print_usage(void) {
   printf(
-      "Usage: io_loader_cache [operation_mode] [block_size] [block_count] "
+      "Usage: io_loader_cache_test [operation_mode] [block_size] [block_count] "
       "[file] "
-      "[range] [direct] [type]\n"
+      "[range] [direct] [type] [repeats]\n"
   );
   printf("  operation_mode: read or write\n");
   printf("  block_size: size of each block in bytes\n");
@@ -34,6 +44,10 @@ void print_usage(void) {
   printf("  range: range in the format 'start-end' (use 0-0 for full file)\n");
   printf("  direct: on/off to enable O_DIRECT\n");
   printf("  type: sequence or random access\n");
+  printf(
+      "  repeats: optional, how many passes to run in one process "
+      "(default: 1)\n"
+  );
 }
 
 int parse_range(const char* range, int64_t* start_offset, int64_t* end_offset) {
@@ -283,8 +297,48 @@ int perform_random_access(
   return 0;
 }
 
+static int parse_repeats(const int argc, char* argv[], int* repeats) {
+  *repeats = 1;
+  if (argc == ARGS_COUNT) {
+    return 0;
+  }
+  if (argc != ARGS_COUNT + 1) {
+    return -1;
+  }
+
+  char* endptr = NULL;
+  const long repeats_long = strtol(argv[EIGHT], &endptr, TEN);
+  if (*endptr != '\0' || repeats_long <= 0 || repeats_long > INT32_MAX) {
+    return -1;
+  }
+  *repeats = (int)repeats_long;
+  return 0;
+}
+
+static double now_seconds(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    return 0.0;
+  }
+  return (double)ts.tv_sec + (double)ts.tv_nsec / ENINE;
+}
+
+static int rewind_for_next_pass(
+    const int fd, const char* access_type, const int64_t start_offset
+) {
+  if (strcmp(access_type, SEQUENCE_ACCESS) != 0) {
+    return 0;
+  }
+
+  if (vtpc_lseek(fd, (off_t)start_offset, SEEK_SET) == (off_t)-1) {
+    perror("Failed to rewind for next pass");
+    return -1;
+  }
+  return 0;
+}
+
 int main(const int argc, char* argv[]) {
-  if (argc != ARGS_COUNT) {
+  if (argc != ARGS_COUNT && argc != ARGS_COUNT + 1) {
     print_usage();
     return EXIT_FAILURE;
   }
@@ -328,22 +382,51 @@ int main(const int argc, char* argv[]) {
   }
   srand(seed);
 
-  const clock_t start_time = clock();
+  int repeats = 1;
+  if (parse_repeats(argc, argv, &repeats) != 0) {
+    print_usage();
+    free(buffer);
+    vtpc_close(filed);
+    return EXIT_FAILURE;
+  }
 
-  perform_read_write(
-      filed,
-      buffer,
-      block_size,
-      block_count,
-      operation_mode,
-      access_type,
-      start_offset,
-      end_offset
-  );
-  const clock_t end_time = clock();
-  const double elapsed_time = (double)(end_time - start_time) / CLOCKS_PER_SEC;
+  const double bytes_total = (double)block_size * (double)block_count;
+  double total_elapsed = 0.0;
+  for (int pass = 1; pass <= repeats; pass++) {
+    if (pass > 1 &&
+        rewind_for_next_pass(filed, access_type, start_offset) != 0) {
+      free(buffer);
+      vtpc_close(filed);
+      return EXIT_FAILURE;
+    }
 
-  printf("Total time taken: %.3f seconds\n", elapsed_time);
+    const double pass_start = now_seconds();
+    perform_read_write(
+        filed,
+        buffer,
+        block_size,
+        block_count,
+        operation_mode,
+        access_type,
+        start_offset,
+        end_offset
+    );
+    const double pass_elapsed = now_seconds() - pass_start;
+    total_elapsed += pass_elapsed;
+
+    const double pass_mib_s =
+        pass_elapsed > 0.0 ? (bytes_total / (1024.0 * 1024.0)) / pass_elapsed
+                           : 0.0;
+    printf(
+        "Pass %d/%d: %.6f seconds, %.2f MiB/s\n",
+        pass,
+        repeats,
+        pass_elapsed,
+        pass_mib_s
+    );
+  }
+
+  printf("Total time taken: %.6f seconds\n", total_elapsed);
   free(buffer);
   vtpc_close(filed);
   return EXIT_SUCCESS;

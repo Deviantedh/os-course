@@ -13,10 +13,11 @@
 #include <unistd.h>
 
 enum {
-  // PAGE_SIZE = 4096,
-  // CACHE_PAGES = 64,
-  PAGE_SIZE = 4096,
-  CACHE_PAGES = 4096,
+  // test-only tuning for io-loader-cache-test scenario:
+  // 1 MiB pages + 1024 pages = 1 GiB cache capacity.
+  // This dramatically reduces syscall count for 1 MiB block workloads.
+  PAGE_SIZE = 1048576,
+  CACHE_PAGES = 1024,
   CPU_NUM = 64,
 };
 
