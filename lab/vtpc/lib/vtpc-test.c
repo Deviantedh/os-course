@@ -13,10 +13,8 @@
 #include <unistd.h>
 
 enum {
-  // PAGE_SIZE = 4096,
-  // CACHE_PAGES = 64,
-  PAGE_SIZE = 4096,
-  CACHE_PAGES = 4096,
+  PAGE_SIZE = 1048576,
+  CACHE_PAGES = 1024,
   CPU_NUM = 64,
   DIRECT_FAST_PATH_ENABLED = 1,
 };
@@ -657,8 +655,9 @@ ssize_t vtpc_read(const int fd, void* buf, const size_t count) {
       return direct_rd;
     }
 
-    const ssize_t tail_rd =
-        read_via_page_cache(fd, (char*)buf + direct_rd, count - (size_t)direct_rd, &cur);
+    const ssize_t tail_rd = read_via_page_cache(
+        fd, (char*)buf + direct_rd, count - (size_t)direct_rd, &cur
+    );
     if (tail_rd < 0) {
       return (direct_rd > 0) ? direct_rd : -1;
     }
