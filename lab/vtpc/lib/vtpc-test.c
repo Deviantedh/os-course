@@ -13,12 +13,10 @@
 #include <unistd.h>
 
 enum {
-  // test-only tuning for io-loader-cache-test scenario:
-  // 1 MiB pages + 1024 pages = 1 GiB cache capacity.
-  // This dramatically reduces syscall count for 1 MiB block workloads.
   PAGE_SIZE = 1048576,
   CACHE_PAGES = 1024,
   CPU_NUM = 64,
+  DIRECT_FAST_PATH_ENABLED = 1,
 };
 
 typedef struct CachePage {
@@ -375,6 +373,17 @@ static int can_use_direct_write_fast_path(
   return (cur % (off_t)PAGE_SIZE) == 0 && (count % (size_t)PAGE_SIZE) == 0;
 }
 
+static int can_use_direct_read_fast_path(
+    const int fd, const void* buf, const off_t cur, const size_t count
+) {
+  const int is_direct = is_o_direct_fd(fd);
+  if (is_direct && (((uintptr_t)buf % (uintptr_t)PAGE_SIZE) != 0U)) {
+    return 0;
+  }
+
+  return (cur % (off_t)PAGE_SIZE) == 0 && (count % (size_t)PAGE_SIZE) == 0;
+}
+
 static ssize_t write_direct_fast_path(
     const int fd, const void* buf, const size_t count, off_t* cur
 ) {
@@ -474,6 +483,84 @@ static ssize_t return_partial_or_error(const size_t total) {
   return (total > 0) ? (ssize_t)total : -1;
 }
 
+static ssize_t read_direct_fast_path(
+    const int fd, void* buf, const size_t count, off_t* cur
+) {
+  const off_t file_size = get_file_size_best_effort(fd);
+  const off_t logical_eof = get_cached_logical_eof(fd, file_size);
+  if (is_at_or_after_eof(*cur, logical_eof)) {
+    return 0;
+  }
+
+  size_t to_read = count;
+  if (logical_eof >= 0) {
+    const off_t remaining = logical_eof - *cur;
+    if (remaining <= 0) {
+      return 0;
+    }
+    if ((off_t)to_read > remaining) {
+      to_read = (size_t)remaining;
+    }
+    to_read -= (to_read % (size_t)PAGE_SIZE);
+    if (to_read == 0) {
+      return 0;
+    }
+  }
+
+  const ssize_t rd = pread_retry(fd, buf, to_read, *cur);
+  if (rd < 0) {
+    return -1;
+  }
+
+  *cur += rd;
+  if (lseek(fd, *cur, SEEK_SET) < 0) {
+    return (rd > 0) ? rd : -1;
+  }
+
+  return rd;
+}
+
+static ssize_t read_via_page_cache(
+    const int fd, void* buf, const size_t count, off_t* cur
+) {
+  const off_t file_size = get_file_size_best_effort(fd);
+  const off_t logical_eof = get_cached_logical_eof(fd, file_size);
+
+  if (is_at_or_after_eof(*cur, logical_eof)) {
+    return 0;
+  }
+
+  size_t total = 0;
+  char* out = (char*)buf;
+
+  while (total < count) {
+    off_t page_offset = 0;
+    size_t in_page = 0;
+    size_t take = 0;
+    if (!prepare_read_chunk(
+            *cur, count, total, logical_eof, &page_offset, &in_page, &take
+        )) {
+      break;
+    }
+
+    CachePage* p = load_page(fd, page_offset);
+    if (!p) {
+      return return_partial_or_error(total);
+    }
+
+    memcpy(out + total, (const char*)p->data + in_page, take);
+
+    total += take;
+    *cur += (off_t)take;
+  }
+
+  if (lseek(fd, *cur, SEEK_SET) < 0) {
+    return (total > 0) ? (ssize_t)total : -1;
+  }
+
+  return (ssize_t)total;
+}
+
 int vtpc_open(const char* path, int mode, const int access) {
   if (init_cache_once() != 0) {
     errno = ENOMEM;
@@ -558,42 +645,26 @@ ssize_t vtpc_read(const int fd, void* buf, const size_t count) {
     return -1;
   }
 
-  const off_t file_size = get_file_size_best_effort(fd);
-  const off_t logical_eof = get_cached_logical_eof(fd, file_size);
-
-  if (is_at_or_after_eof(cur, logical_eof)) {
-    return 0;
-  }
-
-  size_t total = 0;
-  char* out = (char*)buf;
-
-  while (total < count) {
-    off_t page_offset = 0;
-    size_t in_page = 0;
-    size_t take = 0;
-    if (!prepare_read_chunk(
-            cur, count, total, logical_eof, &page_offset, &in_page, &take
-        )) {
-      break;
+  if (DIRECT_FAST_PATH_ENABLED &&
+      can_use_direct_read_fast_path(fd, buf, cur, count)) {
+    const ssize_t direct_rd = read_direct_fast_path(fd, buf, count, &cur);
+    if (direct_rd < 0) {
+      return -1;
+    }
+    if ((size_t)direct_rd == count) {
+      return direct_rd;
     }
 
-    CachePage* p = load_page(fd, page_offset);
-    if (!p) {
-      return return_partial_or_error(total);
+    const ssize_t tail_rd = read_via_page_cache(
+        fd, (char*)buf + direct_rd, count - (size_t)direct_rd, &cur
+    );
+    if (tail_rd < 0) {
+      return (direct_rd > 0) ? direct_rd : -1;
     }
-
-    memcpy(out + total, (const char*)p->data + in_page, take);
-
-    total += take;
-    cur += (off_t)take;
+    return direct_rd + tail_rd;
   }
 
-  if (lseek(fd, cur, SEEK_SET) < 0) {
-    return (total > 0) ? (ssize_t)total : -1;
-  }
-
-  return (ssize_t)total;
+  return read_via_page_cache(fd, buf, count, &cur);
 }
 
 ssize_t vtpc_write(int fd, const void* buf, size_t count) {
@@ -615,7 +686,8 @@ ssize_t vtpc_write(int fd, const void* buf, size_t count) {
     return -1;
   }
 
-  if (can_use_direct_write_fast_path(fd, buf, cur, count)) {
+  if (DIRECT_FAST_PATH_ENABLED &&
+      can_use_direct_write_fast_path(fd, buf, cur, count)) {
     return write_direct_fast_path(fd, buf, count, &cur);
   }
 
